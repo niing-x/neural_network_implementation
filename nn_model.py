@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
+import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from time import time
 from typing import Iterable
 
 import torch
+from scipy import sparse
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -89,94 +90,50 @@ def build_model(hidden_size: int, input_size: int, num_classes: int = 2) -> MLPC
     return MLPClassifier(input_size=input_size, hidden_size=hidden_size, num_classes=num_classes)
 
 
-def load_adult_rows(data_path: str | Path) -> list[dict[str, str]]:
-    path = Path(data_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Adult data not found: {path}")
+def load_processed_data(path: str | Path) -> dict[str, Tensor]:
+    data_path = Path(path)
+    if not data_path.exists():
+        raise FileNotFoundError(f"Processed data not found: {data_path}")
 
-    rows: list[dict[str, str]] = []
-    with path.open("r", encoding="utf-8", newline="") as file:
-        reader = csv.DictReader(file, fieldnames=COLUMN_NAMES)
-        for row in reader:
-            if row["income"] is not None:
-                rows.append(row)
-    return rows
+    with data_path.open("rb") as file:
+        data = pickle.load(file)
 
+    try:
+        processed = {}
+        for name in ("train_features", "val_features", "test_features"):
+            features = data[name]
+            if sparse.issparse(features):
+                features = features.toarray()
+            processed[name] = torch.as_tensor(features, dtype=torch.float32)
 
-def parse_adult_data(
-    data_path: str | Path,
-    categories: dict[str, list[str]] | None = None,
-) -> tuple[list[tuple[Tensor, Tensor]], int, dict[str, list[str]]]:
-    rows = load_adult_rows(data_path)
-    if categories is None:
-        categories = {
-            column: sorted({row[column].strip() for row in rows if row[column].strip() and row[column].strip() != "?"})
-            for column in CATEGORICAL_COLUMNS
-        }
+        for name in ("train_labels", "val_labels", "test_labels"):
+            processed[name] = torch.as_tensor(data[name], dtype=torch.long)
 
-    numeric_columns = [
-        "age",
-        "fnlwgt",
-        "education-num",
-        "capital-gain",
-        "capital-loss",
-        "hours-per-week",
-    ]
-    input_size = sum(len(values) for values in categories.values()) + len(numeric_columns)
-
-    encoded_rows: list[tuple[Tensor, Tensor]] = []
-    for row in rows:
-        feature_vector: list[float] = []
-        for column in numeric_columns:
-            value = row[column].strip()
-            feature_vector.append(float(value) if value not in {"?", ""} else 0.0)
-
-        for column in CATEGORICAL_COLUMNS:
-            value = row[column].strip()
-            values = categories[column]
-            category_index = values.index(value) if value in values else 0
-            one_hot = [0.0] * len(values)
-            one_hot[category_index] = 1.0
-            feature_vector.extend(one_hot)
-
-        label_text = row["income"].strip().rstrip(".")
-        label = 1 if label_text == ">50K" else 0
-        encoded_rows.append((torch.tensor(feature_vector, dtype=torch.float32), torch.tensor(label, dtype=torch.long)))
-
-    return encoded_rows, input_size, categories
-
-
-def standardize_features(train_features: Tensor, test_features: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    mean = train_features.mean(dim=0)
-    std = train_features.std(dim=0, unbiased=False)
-    std = std.clamp_min(1e-6)
-
-    train_standardized = (train_features - mean) / std
-    test_standardized = (test_features - mean) / std
-    return train_standardized, test_standardized, mean, std
+        return processed
+    except KeyError as error:
+        raise ValueError("Processed pickle is missing one or more required datasets") from error
 
 
 def build_dataloaders(
-    train_path: str | Path,
-    test_path: str | Path,
+    processed_data_path: str | Path,
     batch_size: int,
-) -> tuple[DataLoader, DataLoader, int]:
-    train_rows, _, categories = parse_adult_data(train_path)
-    test_rows, input_size, _ = parse_adult_data(test_path, categories)
+) -> tuple[DataLoader, DataLoader, DataLoader, int]:
+    processed = load_processed_data(processed_data_path)
+    train_features = processed["train_features"]
+    train_labels = processed["train_labels"]
+    val_features = processed["val_features"]
+    val_labels = processed["val_labels"]
+    test_features = processed["test_features"]
+    test_labels = processed["test_labels"]
 
-    if len(train_rows[0][0]) != len(test_rows[0][0]):
-        raise ValueError("Training and test data have different feature sizes")
-
-    train_features = torch.stack([row[0] for row in train_rows])
-    train_labels = torch.stack([row[1] for row in train_rows])
-    test_features = torch.stack([row[0] for row in test_rows])
-    test_labels = torch.stack([row[1] for row in test_rows])
-    train_features, test_features, _, _ = standardize_features(train_features, test_features)
+    if train_features.shape[1] != val_features.shape[1] or train_features.shape[1] != test_features.shape[1]:
+        raise ValueError("Training, validation, and test data have different feature sizes")
 
     return (
         DataLoader(TensorDataset(train_features, train_labels), batch_size=batch_size, shuffle=True),
+        DataLoader(TensorDataset(val_features, val_labels), batch_size=batch_size, shuffle=False),
         DataLoader(TensorDataset(test_features, test_labels), batch_size=batch_size, shuffle=False),
-        input_size,
+        train_features.shape[1],
     )
 
 
@@ -282,8 +239,7 @@ def save_checkpoint(model: nn.Module, path: Path, metadata: dict[str, object]) -
 
 def train_and_evaluate(
     hidden_size: int,
-    train_path: str,
-    test_path: str,
+    processed_data_path: str,
     batch_size: int,
     epochs: int,
     learning_rate: float,
@@ -291,7 +247,7 @@ def train_and_evaluate(
     output_dir: str,
 ) -> tuple[MLPClassifier, list[TrainingMetrics]]:
     device_obj = torch.device(device)
-    train_loader, test_loader, input_size = build_dataloaders(train_path, test_path, batch_size)
+    train_loader, val_loader, test_loader, input_size = build_dataloaders(processed_data_path, batch_size)
     model = build_model(hidden_size=hidden_size, input_size=input_size).to(device_obj)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=DEFAULT_WEIGHT_DECAY)
     loss_fn = nn.CrossEntropyLoss()
@@ -304,15 +260,15 @@ def train_and_evaluate(
 
     for epoch in range(1, epochs + 1):
         train_loss, train_accuracy = train_epoch(model, train_loader, optimizer, loss_fn, device_obj)
-        test_loss, test_accuracy = evaluate(model, test_loader, loss_fn, device_obj)
-        scheduler.step(test_accuracy)
+        val_loss, val_accuracy = evaluate(model, val_loader, loss_fn, device_obj)
+        scheduler.step(val_accuracy)
         metrics.append(
             TrainingMetrics(
                 epoch=epoch,
                 train_loss=train_loss,
                 train_accuracy=train_accuracy,
-                test_loss=test_loss,
-                test_accuracy=test_accuracy,
+                test_loss=val_loss,
+                test_accuracy=val_accuracy,
                 learning_rate=optimizer.param_groups[0]["lr"],
             )
         )
@@ -320,12 +276,12 @@ def train_and_evaluate(
         print(
             f"Epoch {epoch:>2}/{epochs} | "
             f"train_loss={train_loss:.4f} | train_acc={train_accuracy:.4%} | "
-            f"test_loss={test_loss:.4f} | test_acc={test_accuracy:.4%} | "
+            f"val_loss={val_loss:.4f} | val_acc={val_accuracy:.4%} | "
             f"lr={optimizer.param_groups[0]['lr']:.2e}"
         )
 
-        if test_accuracy > best_accuracy:
-            best_accuracy = test_accuracy
+        if val_accuracy > best_accuracy:
+            best_accuracy = val_accuracy
             best_state = {key: value.clone() for key, value in model.state_dict().items()}
 
     elapsed = time() - start_time
@@ -335,6 +291,11 @@ def train_and_evaluate(
     save_training_results(metrics, output_path)
     if best_state is not None:
         model.load_state_dict(best_state)
+
+    test_loss, test_accuracy = evaluate(model, test_loader, nn.CrossEntropyLoss(), device_obj)
+    print(f"Best validation accuracy: {best_accuracy:.4%}")
+    print(f"Final test accuracy: {test_accuracy:.4%}")
+
     save_checkpoint(
         model,
         output_path / "model_checkpoint.pt",
@@ -344,7 +305,8 @@ def train_and_evaluate(
             "learning_rate": learning_rate,
             "batch_size": batch_size,
             "input_size": input_size,
-            "best_test_accuracy": best_accuracy,
+            "best_validation_accuracy": best_accuracy,
+            "test_accuracy": test_accuracy,
         },
     )
     return model, metrics
@@ -353,8 +315,7 @@ def train_and_evaluate(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train and evaluate a three-hidden-layer classifier on the Adult Census dataset.")
     parser.add_argument("--hidden-size", type=int, choices=(32, 64), default=DEFAULT_HIDDEN_SIZE)
-    parser.add_argument("--train-path", type=str, default="data/adult.data")
-    parser.add_argument("--test-path", type=str, default="data/adult.test")
+    parser.add_argument("--processed-data", type=str, default="processed_data.pkl")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
@@ -376,8 +337,7 @@ def main() -> None:
 
     train_and_evaluate(
         hidden_size=args.hidden_size,
-        train_path=args.train_path,
-        test_path=args.test_path,
+        processed_data_path=args.processed_data,
         batch_size=args.batch_size,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
