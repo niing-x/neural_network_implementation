@@ -1,6 +1,8 @@
-from ucimlrepo import fetch_ucirepo
-import pandas as pd
+import pickle
+
 import numpy as np
+import pandas as pd
+from ucimlrepo import fetch_ucirepo
 
 from sklearn.model_selection import train_test_split
 from sklearn.compose import ColumnTransformer
@@ -121,7 +123,20 @@ X_train_processed = preprocessor.fit_transform(X_train)
 
 X_val_processed = preprocessor.transform(X_val)
 
+X_val_processed = preprocessor.transform(X_val)
 X_test_processed = preprocessor.transform(X_test)
+
+processed_data = {
+    "train_features": X_train_processed,
+    "train_labels": y_train.to_numpy(),
+    "val_features": X_val_processed,
+    "val_labels": y_val.to_numpy(),
+    "test_features": X_test_processed,
+    "test_labels": y_test.to_numpy(),
+}
+
+with open("processed_data.pkl", "wb") as file:
+    pickle.dump(processed_data, file)
 
 
 # ==============================
@@ -132,5 +147,6 @@ print("\nAfter preprocessing:")
 print("Training:", X_train_processed.shape)
 print("Validation:", X_val_processed.shape)
 print("Test:", X_test_processed.shape)
+print("Saved processed dataset to: processed_data.pkl")
 
 print("\nPreprocessing completed successfully!")
