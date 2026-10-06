@@ -21,13 +21,15 @@ from perf_eval import PerfEvaluator, model_size_torch, torch_predict_proba
 
 
 DEFAULT_BATCH_SIZE = 128
-DEFAULT_EPOCHS = 40
+DEFAULT_EPOCHS = 30
 DEFAULT_LEARNING_RATE = 3e-4
 DEFAULT_HIDDEN_SIZE = 64
 DEFAULT_WEIGHT_DECAY = 1e-4
 DEFAULT_DROPOUT = 0.3
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEFAULT_PROCESSED_DATA_PATH = "processed_data.pkl"
 
+# Define the neural network model class and related functions for training.
 class MLPClassifier(nn.Module):
     """Three-hidden-layer MLP for tabular Adult Census classification."""
 
@@ -62,10 +64,12 @@ class MLPClassifier(nn.Module):
         return self.output_layer(self.hidden_layers(x))
 
 
+# Instantiate the model with the specified hidden size and input size.
 def build_model(hidden_size: int, input_size: int, num_classes: int = 2) -> MLPClassifier:
     return MLPClassifier(input_size=input_size, hidden_size=hidden_size, num_classes=num_classes)
 
 
+# Load the processed data from SQ's pipeline processed data and convert it to PyTorch tensors.
 def load_processed_data(path: str | Path) -> dict[str, Tensor]:
     data_path = Path(path)
     if not data_path.exists():
@@ -90,6 +94,7 @@ def load_processed_data(path: str | Path) -> dict[str, Tensor]:
         raise ValueError("Processed pickle is missing one or more required datasets") from error
 
 
+# Build PyTorch DataLoaders for training, validation, and testing.
 def build_dataloaders(
     processed_data_path: str | Path,
     batch_size: int,
@@ -113,6 +118,7 @@ def build_dataloaders(
     )
 
 
+# Define a dataclass to hold training metrics for each epoch.
 @dataclass
 class TrainingMetrics:
     epoch: int
@@ -123,6 +129,7 @@ class TrainingMetrics:
     learning_rate: float
 
 
+# Define a class to track the average of a metric over time.
 class AverageMeter:
     def __init__(self) -> None:
         self.total = 0.0
@@ -137,6 +144,7 @@ class AverageMeter:
         return self.total / self.count if self.count else 0.0
 
 
+# Evaluate the model on a given dataset and return the average loss and accuracy.
 def evaluate(model: nn.Module, data_loader: DataLoader, loss_fn: nn.Module, device: torch.device) -> tuple[float, float]:
     model.eval()
     loss_meter = AverageMeter()
@@ -159,6 +167,7 @@ def evaluate(model: nn.Module, data_loader: DataLoader, loss_fn: nn.Module, devi
     return loss_meter.average, correct / total
 
 
+# Train the model for one epoch and return the average loss and accuracy.
 def train_epoch(
     model: nn.Module,
     train_loader: DataLoader,
@@ -189,6 +198,7 @@ def train_epoch(
     return loss_meter.average, correct / total
 
 
+# Save the training metrics to a JSON file in the specified output directory.
 def save_training_results(metrics: Iterable[TrainingMetrics], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     records = [
@@ -207,12 +217,14 @@ def save_training_results(metrics: Iterable[TrainingMetrics], output_dir: Path) 
         json.dump(records, file, indent=2)
 
 
+# Save the model checkpoint, including the model state and metadata, to a specified path.
 def save_checkpoint(model: nn.Module, path: Path, metadata: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {"model_state_dict": model.state_dict(), "metadata": metadata}
     torch.save(checkpoint, path)
 
 
+# Train and evaluate the model, returning the trained model and training metrics.
 def train_and_evaluate(
     hidden_size: int,
     processed_data_path: str,
@@ -295,10 +307,11 @@ def train_and_evaluate(
     return model, metrics
 
 
+# Parse command-line arguments for training configuration.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train and evaluate a three-hidden-layer classifier on the Adult Census dataset.")
     parser.add_argument("--hidden-size", type=int, choices=(32, 64), default=DEFAULT_HIDDEN_SIZE)
-    parser.add_argument("--processed-data", type=str, default="processed_data.pkl")
+    parser.add_argument("--processed-data", type=str, default=DEFAULT_PROCESSED_DATA_PATH)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
@@ -307,6 +320,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# Main function to execute the training and evaluation process based on command-line arguments.
 def main() -> None:
     args = parse_args()
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
