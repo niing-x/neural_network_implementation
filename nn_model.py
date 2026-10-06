@@ -1,3 +1,7 @@
+"""
+The code below is for the neural network model implementation and training. 
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -13,6 +17,8 @@ from scipy import sparse
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from perf_eval import PerfEvaluator, model_size_torch, torch_predict_proba
+
 
 DEFAULT_BATCH_SIZE = 128
 DEFAULT_EPOCHS = 40
@@ -21,36 +27,6 @@ DEFAULT_HIDDEN_SIZE = 64
 DEFAULT_WEIGHT_DECAY = 1e-4
 DEFAULT_DROPOUT = 0.3
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-COLUMN_NAMES = [
-    "age",
-    "workclass",
-    "fnlwgt",
-    "education",
-    "education-num",
-    "marital-status",
-    "occupation",
-    "relationship",
-    "race",
-    "sex",
-    "capital-gain",
-    "capital-loss",
-    "hours-per-week",
-    "native-country",
-    "income",
-]
-
-CATEGORICAL_COLUMNS = [
-    "workclass",
-    "education",
-    "marital-status",
-    "occupation",
-    "relationship",
-    "race",
-    "sex",
-    "native-country",
-]
-
 
 class MLPClassifier(nn.Module):
     """Three-hidden-layer MLP for tabular Adult Census classification."""
@@ -292,9 +268,16 @@ def train_and_evaluate(
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    test_loss, test_accuracy = evaluate(model, test_loader, nn.CrossEntropyLoss(), device_obj)
+    perf = PerfEvaluator(f"nn_mlp_h{hidden_size}")
+    perf.train_time_s = elapsed
+    X_test, y_test = test_loader.dataset.tensors
+    y_proba = perf.time_predict(torch_predict_proba(model, device_obj), X_test)
+    perf.record_model_size(*model_size_torch(model))
+    result = perf.evaluate(y_test.numpy(), y_proba)
+    perf.print_report()
+
+    test_accuracy = result.accuracy
     print(f"Best validation accuracy: {best_accuracy:.4%}")
-    print(f"Final test accuracy: {test_accuracy:.4%}")
 
     save_checkpoint(
         model,
