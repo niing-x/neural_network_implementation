@@ -22,13 +22,14 @@ from perf_eval import PerfEvaluator, model_size_torch, torch_predict_proba
 
 
 DEFAULT_BATCH_SIZE = 128
-DEFAULT_EPOCHS = 30
+DEFAULT_EPOCHS = 50
 DEFAULT_LEARNING_RATE = 3e-4
 DEFAULT_HIDDEN_SIZE = 64
 DEFAULT_WEIGHT_DECAY = 1e-4
 DEFAULT_DROPOUT = 0.3
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEFAULT_PROCESSED_DATA_PATH = "processed_data.pkl"
+DEFAULT_PATIENCE = 5
 
 # Define the neural network model class and related functions for training.
 class MLPClassifier(nn.Module):
@@ -234,23 +235,26 @@ def train_and_evaluate(
     learning_rate: float,
     device: str,
     output_dir: str,
+    patience: int = DEFAULT_PATIENCE,
 ) -> tuple[MLPClassifier, list[TrainingMetrics]]:
     device_obj = torch.device(device)
     train_loader, val_loader, test_loader, input_size = build_dataloaders(processed_data_path, batch_size)
     model = build_model(hidden_size=hidden_size, input_size=input_size).to(device_obj)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=DEFAULT_WEIGHT_DECAY)
     loss_fn = nn.CrossEntropyLoss()
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", patience=3, factor=0.5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", patience=3, factor=0.5)
 
     metrics: list[TrainingMetrics] = []
     best_accuracy = 0.0
     best_state = None
+    best_val_loss = float("inf")
+    epochs_without_improvement = 0
     start_time = time()
 
     for epoch in range(1, epochs + 1):
         train_loss, train_accuracy = train_epoch(model, train_loader, optimizer, loss_fn, device_obj)
         val_loss, val_accuracy = evaluate(model, val_loader, loss_fn, device_obj)
-        scheduler.step(val_accuracy)
+        scheduler.step(val_loss)
         metrics.append(
             TrainingMetrics(
                 epoch=epoch,
@@ -272,6 +276,16 @@ def train_and_evaluate(
         if val_accuracy > best_accuracy:
             best_accuracy = val_accuracy
             best_state = {key: value.clone() for key, value in model.state_dict().items()}
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= patience:
+                print(f"Early stopping: val_loss hasn't improved for {patience} epochs "
+                    f"(stopped after epoch {epoch}/{epochs}).")
+                break
 
     elapsed = time() - start_time
     print(f"Training finished in {elapsed:.1f} seconds.")
@@ -320,6 +334,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--processed-data", type=str, default=DEFAULT_PROCESSED_DATA_PATH)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
+    parser.add_argument("--patience", type=int, default=DEFAULT_PATIENCE,
+                        help="stop if val_loss doesn't improve for this many epochs")
     parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
     parser.add_argument("--device", type=str, default=DEFAULT_DEVICE)
     parser.add_argument("--output-dir", type=str, default="./output")
@@ -343,6 +359,7 @@ def main() -> None:
         processed_data_path=args.processed_data,
         batch_size=args.batch_size,
         epochs=args.epochs,
+        patience=args.patience,
         learning_rate=args.learning_rate,
         device=args.device,
         output_dir=args.output_dir,
