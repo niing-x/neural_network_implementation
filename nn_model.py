@@ -12,6 +12,7 @@ from pathlib import Path
 from time import time
 from typing import Iterable
 
+import matplotlib.pyplot as plt
 import torch
 from scipy import sparse
 from torch import Tensor, nn
@@ -287,6 +288,11 @@ def train_and_evaluate(
     perf.record_model_size(*model_size_torch(model))
     result = perf.evaluate(y_test.numpy(), y_proba)
     perf.print_report()
+
+    fig, ax = plt.subplots()
+    perf.plot_confusion_matrix(ax=ax)
+    fig.savefig(output_path / f"{perf.name}_confusion_matrix.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
     test_accuracy = result.accuracy
     print(f"Best validation accuracy: {best_accuracy:.4%}")
